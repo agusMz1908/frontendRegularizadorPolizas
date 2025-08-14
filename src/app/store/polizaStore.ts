@@ -1,115 +1,6 @@
+import type { AzureProcessResult, ClientDto, CompanyDto, MasterDataDto, PolizaFormData, SeccionDto } from '@/shared/types';
 import { create } from 'zustand';
 
-// ===== TIPOS INLINE =====
-interface ClientDto {
-  id: number;
-  clinom: string;
-  cliruc: string;
-  clidir: string;
-  clitel?: string;
-  cliemail?: string;
-}
-
-interface CompanyDto {
-  id: number;
-  comnom: string;
-  comalias: string;
-  activo: boolean;
-}
-
-interface SeccionDto {
-  id: number;
-  seccion: string;
-  activo: boolean;
-}
-
-interface MasterDataDto {
-  categorias: Array<{id: number, catdsc: string}>;
-  destinos: Array<{id: number, desnom: string}>;
-  calidades: Array<{id: number, caldsc: string}>;
-  combustibles: Array<{id: string, name: string}>;
-  monedas: Array<{id: number, nombre: string, simbolo?: string}>;
-  departamentos: Array<{id: number, nombre: string}>;
-}
-
-interface AzureProcessResult {
-  success: boolean;
-  archivo: string;
-  datosVelneo: {
-    datosBasicos: {
-      asegurado: string;
-      documento: string;
-      domicilio?: string;
-      email?: string;
-      telefono?: string;
-      departamento?: string;
-      localidad?: string;
-    };
-    datosPoliza: {
-      numeroPoliza: string;
-      endoso?: string;
-      desde?: string;
-      hasta?: string;
-      certificado?: string;
-      tipoMovimiento?: string;
-    };
-    datosVehiculo: {
-      marcaModelo?: string;
-      marca?: string;
-      modelo?: string;
-      anio?: string;
-      matricula?: string;
-      motor?: string;
-      chasis?: string;
-      categoria?: string;
-      destino?: string;
-      calidad?: string;
-      combustible?: string;
-    };
-    condicionesPago: {
-      premio?: number;
-      total?: number;
-      formaPago?: string;
-      cuotas?: number;
-      valorCuota?: number;
-    };
-  };
-  porcentajeCompletitud: number;
-  camposExtraidos: number;
-  camposFaltantes: string[];
-}
-
-interface PolizaFormData {
-  clienteId: number;
-  compañiaId: number;
-  seccionId: number;
-  numeroPoliza: string;
-  endoso: string;
-  fechaDesde: string;
-  fechaHasta: string;
-  certificado: string;
-  marcaModelo: string;
-  anio: string;
-  matricula: string;
-  motor: string;
-  chasis: string;
-  categoriaId: number;
-  destinoId: number;
-  calidadId: number;
-  combustibleId: string;
-  premio: number;
-  total: number;
-  formaPago: string;
-  cuotas: number;
-  valorCuota: number;
-  monedaId: number;
-  domicilio: string;
-  departamentoId: number;
-  observaciones: string;
-  procesadoConIA: boolean;
-}
-
-// ===== SERVICIOS API CORREGIDOS =====
 class PolizaApiService {
   private static readonly API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://localhost:7191/api';
   
@@ -146,6 +37,33 @@ class PolizaApiService {
       return clients;
     } catch (error) {
       console.error('❌ Error en searchClients:', error);
+      throw error;
+    }
+  }
+
+  static async getTarifas(): Promise<any[]> {
+    try {
+      console.log('🎯 Obteniendo tarifas...');
+      
+      const response = await fetch(`${this.API_BASE_URL}/Tarifa`, {
+        headers: this.getAuthHeaders(),
+      });
+
+      console.log(`📡 Response status: ${response.status}`);
+
+      if (!response.ok) {
+        throw new Error(`Error obteniendo tarifas: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('📊 Tarifas obtenidas:', data);
+      
+      const tarifas = data.data || data || [];
+      console.log(`✅ ${tarifas.length} tarifas obtenidas`);
+      
+      return tarifas;
+    } catch (error) {
+      console.error('❌ Error en getTarifas:', error);
       throw error;
     }
   }
@@ -213,7 +131,7 @@ class PolizaApiService {
     try {
       console.log('🎯 Obteniendo datos maestros...');
       
-      // Usar el endpoint que SÍ existe: /api/Velneo/mapping-options
+      // Intentar endpoint unificado primero
       const response = await fetch(`${this.API_BASE_URL}/Velneo/mapping-options`, {
         headers: this.getAuthHeaders(),
       });
@@ -221,35 +139,63 @@ class PolizaApiService {
       console.log(`📡 Response status: ${response.status}`);
 
       if (!response.ok) {
-        throw new Error(`Error obteniendo maestros: ${response.status} ${response.statusText}`);
+        console.warn('⚠️ Endpoint unificado falló, usando maestros individuales...');
+        return await this.getMasterDataIndividual();
       }
 
       const data = await response.json();
-      console.log('📊 Maestros obtenidos:', data);
+      console.log('📊 Maestros obtenidos (unificado):', data);
       
-      // El endpoint /Velneo/mapping-options devuelve directamente MasterDataOptionsDto
+      // El endpoint unificado probablemente no incluye tarifas ni departamentos
+      // Cargarlos por separado en paralelo
+      const promesas = [];
+      
+      if (!data.tarifas) {
+        promesas.push(this.getTarifas().then(tarifas => ({ key: 'tarifas', value: tarifas })));
+      }
+      
+      if (!data.departamentos || data.departamentos.length === 0) {
+        promesas.push(
+          fetch(`${this.API_BASE_URL}/Departamento`, { headers: this.getAuthHeaders() })
+            .then(res => res.json())
+            .then(res => ({ key: 'departamentos', value: res.data || [] }))
+        );
+      }
+      
+      // Ejecutar promesas adicionales si hay alguna
+      if (promesas.length > 0) {
+        console.log(`🔄 Cargando ${promesas.length} maestros adicionales...`);
+        const resultados = await Promise.all(promesas);
+        
+        resultados.forEach(resultado => {
+          data[resultado.key] = resultado.value;
+          console.log(`✅ ${resultado.key}: ${resultado.value.length} elementos cargados`);
+        });
+      }
+
       console.log('✅ Maestros procesados correctamente');
-      
       return data;
     } catch (error) {
       console.error('❌ Error en getMasterData:', error);
-      throw error;
+      // Si falla todo, usar método individual
+      return await this.getMasterDataIndividual();
     }
   }
 
   // ===== OBTENER MAESTROS INDIVIDUALES (ALTERNATIVA) =====
-  static async getMasterDataIndividual(): Promise<MasterDataDto> {
+ static async getMasterDataIndividual(): Promise<MasterDataDto> {
     try {
       console.log('🎯 Obteniendo maestros individuales...');
       
-      // Hacer llamadas paralelas a cada endpoint individual
-      const [categorias, destinos, calidades, combustibles, monedas, departamentos] = await Promise.all([
+      // Hacer llamadas paralelas a cada endpoint individual (incluyendo tarifas)
+      const [categorias, destinos, calidades, combustibles, monedas, departamentos, tarifas] = await Promise.all([
         fetch(`${this.API_BASE_URL}/Categoria`, { headers: this.getAuthHeaders() }),
         fetch(`${this.API_BASE_URL}/Destino`, { headers: this.getAuthHeaders() }),
         fetch(`${this.API_BASE_URL}/Calidad`, { headers: this.getAuthHeaders() }),
         fetch(`${this.API_BASE_URL}/Combustible`, { headers: this.getAuthHeaders() }),
         fetch(`${this.API_BASE_URL}/Moneda`, { headers: this.getAuthHeaders() }),
-        fetch(`${this.API_BASE_URL}/Departamento`, { headers: this.getAuthHeaders() })
+        fetch(`${this.API_BASE_URL}/Departamento`, { headers: this.getAuthHeaders() }),
+        fetch(`${this.API_BASE_URL}/Tarifa`, { headers: this.getAuthHeaders() })
       ]);
 
       console.log('📡 Responses status:', {
@@ -258,7 +204,8 @@ class PolizaApiService {
         calidades: calidades.status,
         combustibles: combustibles.status,
         monedas: monedas.status,
-        departamentos: departamentos.status
+        departamentos: departamentos.status,
+        tarifas: tarifas.status
       });
 
       // Procesar respuestas
@@ -268,34 +215,39 @@ class PolizaApiService {
         calidadesData,
         combustiblesData,
         monedasData,
-        departamentosData
+        departamentosData,
+        tarifasData
       ] = await Promise.all([
         categorias.ok ? categorias.json() : { data: [] },
         destinos.ok ? destinos.json() : { data: [] },
         calidades.ok ? calidades.json() : { data: [] },
         combustibles.ok ? combustibles.json() : { data: [] },
         monedas.ok ? monedas.json() : { data: [] },
-        departamentos.ok ? departamentos.json() : { data: [] }
+        departamentos.ok ? departamentos.json() : { data: [] },
+        tarifas.ok ? tarifas.json() : { data: [] }
       ]);
 
+      console.log('📊 Datos procesados:', {
+        categorias: categoriasData.data?.length || 0,
+        destinos: destinosData.data?.length || 0,
+        calidades: calidadesData.data?.length || 0,
+        combustibles: combustiblesData.data?.length || 0,
+        monedas: monedasData.data?.length || 0,
+        departamentos: departamentosData.data?.length || 0,
+        tarifas: tarifasData.data?.length || 0
+      });
+
       const masterData: MasterDataDto = {
-        categorias: categoriasData.data || categoriasData || [],
-        destinos: destinosData.data || destinosData || [],
-        calidades: calidadesData.data || calidadesData || [],
-        combustibles: combustiblesData.data || combustiblesData || [],
-        monedas: monedasData.data || monedasData || [],
-        departamentos: departamentosData.data || departamentosData || []
+        categorias: categoriasData.data || [],
+        destinos: destinosData.data || [],
+        calidades: calidadesData.data || [],
+        combustibles: combustiblesData.data || [],
+        monedas: monedasData.data || [],
+        departamentos: departamentosData.data || [],
+        tarifas: tarifasData.data || []
       };
 
-      console.log('✅ Maestros individuales procesados:', {
-        categorias: masterData.categorias.length,
-        destinos: masterData.destinos.length,
-        calidades: masterData.calidades.length,
-        combustibles: masterData.combustibles.length,
-        monedas: masterData.monedas.length,
-        departamentos: masterData.departamentos.length
-      });
-      
+      console.log('✅ Maestros individuales procesados correctamente');
       return masterData;
     } catch (error) {
       console.error('❌ Error en getMasterDataIndividual:', error);
@@ -555,36 +507,40 @@ loadMasterData: async () => {
       // Auto-crear form data basado en escaneo
       const { selectedClient, selectedCompany, selectedSection } = get();
       if (selectedClient && selectedCompany && selectedSection && result.datosVelneo) {
-        const formData: PolizaFormData = {
-          clienteId: selectedClient.id,
-          compañiaId: selectedCompany.id,
-          seccionId: selectedSection.id,
-          numeroPoliza: result.datosVelneo.datosPoliza?.numeroPoliza || '',
-          endoso: result.datosVelneo.datosPoliza?.endoso || '0',
-          fechaDesde: result.datosVelneo.datosPoliza?.desde || '',
-          fechaHasta: result.datosVelneo.datosPoliza?.hasta || '',
-          certificado: result.datosVelneo.datosPoliza?.certificado || '',
-          marcaModelo: result.datosVelneo.datosVehiculo?.marcaModelo || '',
-          anio: result.datosVelneo.datosVehiculo?.anio || '',
-          matricula: result.datosVelneo.datosVehiculo?.matricula || '',
-          motor: result.datosVelneo.datosVehiculo?.motor || '',
-          chasis: result.datosVelneo.datosVehiculo?.chasis || '',
-          categoriaId: 0, // Se mapea con maestros
-          destinoId: 0,   // Se mapea con maestros
-          calidadId: 0,   // Se mapea con maestros
-          combustibleId: '', // Se mapea con maestros
-          premio: result.datosVelneo.condicionesPago?.premio || 0,
-          total: result.datosVelneo.condicionesPago?.total || 0,
-          formaPago: result.datosVelneo.condicionesPago?.formaPago || '',
-          cuotas: result.datosVelneo.condicionesPago?.cuotas || 1,
-          valorCuota: result.datosVelneo.condicionesPago?.valorCuota || 0,
-          monedaId: 1, // Default peso uruguayo
-          domicilio: result.datosVelneo.datosBasicos?.domicilio || selectedClient.clidir,
-          departamentoId: 0, // Se mapea con maestros
-          observaciones: `Procesado con IA - ${result.porcentajeCompletitud}% completitud`,
-          procesadoConIA: true
-        };
+      const formData: PolizaFormData = {
+        clienteId: selectedClient.id,
+        compañiaId: selectedCompany.id,
+        seccionId: selectedSection.id,
+        numeroPoliza: result.datosVelneo.datosPoliza?.numeroPoliza || '',
+        endoso: result.datosVelneo.datosPoliza?.endoso || '0',
+        fechaDesde: result.datosVelneo.datosPoliza?.desde || '',
+        fechaHasta: result.datosVelneo.datosPoliza?.hasta || '',
+        certificado: result.datosVelneo.datosPoliza?.certificado || '',
+        marcaModelo: result.datosVelneo.datosVehiculo?.marcaModelo || '',
+        anio: result.datosVelneo.datosVehiculo?.anio || '',
+        matricula: result.datosVelneo.datosVehiculo?.matricula || '',
+        motor: result.datosVelneo.datosVehiculo?.motor || '',
+        chasis: result.datosVelneo.datosVehiculo?.chasis || '',
+        categoriaId: 0, // Se mapea con maestros
+        destinoId: 0,   // Se mapea con maestros
+        calidadId: 0,   // Se mapea con maestros
+        combustibleId: '', // Se mapea con maestros
+        premio: result.datosVelneo.condicionesPago?.premio || 0,
+        total: result.datosVelneo.condicionesPago?.total || 0,
+        formaPago: result.datosVelneo.condicionesPago?.formaPago || '',
+        cuotas: result.datosVelneo.condicionesPago?.cuotas || 1,
+        valorCuota: result.datosVelneo.condicionesPago?.valorCuota || 0,
+        monedaId: 1, // Default peso uruguayo
         
+        // ✅ AGREGAR ESTOS CAMPOS FALTANTES:
+        coberturaId: 0, // Se mapea con maestros/tarifas
+        zonaCirculacionId: 0, // Se mapea con maestros/departamentos
+        
+        direccionCobro: result.datosVelneo.datosBasicos?.domicilio || selectedClient.clidir,
+        observaciones: `Procesado con IA - ${result.porcentajeCompletitud}% completitud`,
+        procesadoConIA: true,
+        monedaCoberturaId: 0
+      }; 
         set({ formData });
       }
       
@@ -631,7 +587,7 @@ loadMasterData: async () => {
         // Datos cliente
         asegurado: selectedClient.clinom,
         clinom: selectedClient.clinom,
-        condom: formData.domicilio,
+        condom: formData.direccionCobro,
         documento: selectedClient.cliruc,
         email: selectedClient.cliemail || '',
         telefono: selectedClient.clitel || '',
