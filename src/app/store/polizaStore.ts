@@ -323,7 +323,6 @@ class PolizaApiService {
   }
 }
 
-// ===== STORE STATE =====
 interface PolizaState {
   // Datos del wizard
   selectedClient: ClientDto | null;
@@ -362,9 +361,14 @@ interface PolizaState {
   resetWizard: () => void;
   setCurrentStep: (step: 'client' | 'company' | 'document' | 'form' | 'success') => void;
   clearError: () => void;
+  
+  // ===== MÉTODOS AUXILIARES (AGREGADOS A LA INTERFAZ) =====
+  formatDateForVelneo: (dateString: string) => string;
+  mapearFormaPago: (formaPago: string) => string;
+  buildObservaciones: (formData: any) => string;
+  validateRequestBeforeSend: (request: any) => { isValid: boolean; errors: string[] };
 }
 
-// ===== STORE IMPLEMENTATION =====
 export const usePolizaStore = create<PolizaState>((set, get) => ({
   // Estado inicial
   selectedClient: null,
@@ -415,6 +419,94 @@ export const usePolizaStore = create<PolizaState>((set, get) => ({
 
   clearError: () => set({ error: null }),
 
+  // ===== MÉTODOS AUXILIARES DENTRO DEL STORE =====
+  formatDateForVelneo: (dateString: string): string => {
+    if (!dateString) return new Date().toISOString().split('T')[0];
+    
+    try {
+      const date = new Date(dateString);
+      return date.toISOString().split('T')[0]; // YYYY-MM-DD
+    } catch {
+      return new Date().toISOString().split('T')[0];
+    }
+  },
+
+  mapearFormaPago: (formaPago: string): string => {
+    if (!formaPago) return "CONTADO";
+    
+    const mapeo: Record<string, string> = {
+      'CONTADO': 'CONTADO',
+      'TARJETA_CREDITO': 'CONTADO', // Velneo maneja tarjeta como contado
+      'TARJETA DE CRÉDITO': 'CONTADO',
+      'CUOTAS': 'C',
+      'FINANCIADO': 'C'
+    };
+    
+    return mapeo[formaPago.toUpperCase()] || 'CONTADO';
+  },
+
+  buildObservaciones: (formData: any): string => {
+    const obs = [];
+    
+    if (formData.procesadoConIA) {
+      obs.push('Procesado con Azure Document Intelligence');
+    }
+    
+    if (formData.observaciones) {
+      obs.push(formData.observaciones);
+    }
+    
+    if (formData.formaPago && formData.total) {
+      obs.push(`Pago: ${formData.formaPago} - $U ${formData.total.toLocaleString()}`);
+    }
+    
+    return obs.join('\r\n');
+  },
+
+  validateRequestBeforeSend: (request: any): { isValid: boolean; errors: string[] } => {
+    const errors: string[] = [];
+    
+    // Validaciones críticas
+    if (!request.comcod || request.comcod === 0) {
+      errors.push('comcod (ID compañía) es requerido');
+    }
+    
+    if (!request.clinro || request.clinro === 0) {
+      errors.push('clinro (ID cliente) es requerido');
+    }
+    
+    if (!request.seccod || request.seccod === 0) {
+      errors.push('seccod (ID sección) es requerido');
+    }
+    
+    if (!request.conpol || request.conpol.trim() === '') {
+      errors.push('conpol (número póliza) es requerido');
+    }
+    
+    if (!request.confchdes) {
+      errors.push('confchdes (fecha desde) es requerido');
+    }
+    
+    if (!request.confchhas) {
+      errors.push('confchhas (fecha hasta) es requerido');
+    }
+    
+    if (!request.conpremio || request.conpremio <= 0) {
+      errors.push('conpremio (premio) debe ser mayor a 0');
+    }
+    
+    // Validar que clinro1 coincida con clinro
+    if (request.clinro1 !== request.clinro) {
+      console.warn('⚠️ clinro1 no coincide con clinro, corrigiendo...');
+      request.clinro1 = request.clinro;
+    }
+    
+    return {
+      isValid: errors.length === 0,
+      errors
+    };
+  },
+
   // ===== BUSCAR CLIENTES =====
   searchClients: async (filtro: string) => {
     if (!filtro.trim()) {
@@ -438,28 +530,27 @@ export const usePolizaStore = create<PolizaState>((set, get) => ({
   },
 
   // ===== CARGAR MAESTROS =====
-loadMasterData: async () => {
-  set({ isLoading: true, error: null });
-  
-  try {
-    // Intentar primero con el endpoint unificado
-    let masterData;
-    try {
-      masterData = await PolizaApiService.getMasterData();
-    } catch (error) {
-      console.log('⚠️ Endpoint unificado falló, intentando maestros individuales...');
-      masterData = await PolizaApiService.getMasterDataIndividual();
-    }
+  loadMasterData: async () => {
+    set({ isLoading: true, error: null });
     
-    set({ masterData, isLoading: false });
-  } catch (error) {
-    console.error('❌ Error cargando maestros:', error);
-    set({ 
-      error: error instanceof Error ? error.message : 'Error cargando maestros',
-      isLoading: false 
-    });
-  }
-},
+    try {
+      let masterData;
+      try {
+        masterData = await PolizaApiService.getMasterData();
+      } catch (error) {
+        console.log('⚠️ Endpoint unificado falló, intentando maestros individuales...');
+        masterData = await PolizaApiService.getMasterDataIndividual();
+      }
+      
+      set({ masterData, isLoading: false });
+    } catch (error) {
+      console.error('❌ Error cargando maestros:', error);
+      set({ 
+        error: error instanceof Error ? error.message : 'Error cargando maestros',
+        isLoading: false 
+      });
+    }
+  },
 
   // ===== CARGAR COMPAÑÍAS =====
   loadCompanies: async () => {
@@ -507,40 +598,37 @@ loadMasterData: async () => {
       // Auto-crear form data basado en escaneo
       const { selectedClient, selectedCompany, selectedSection } = get();
       if (selectedClient && selectedCompany && selectedSection && result.datosVelneo) {
-      const formData: PolizaFormData = {
-        clienteId: selectedClient.id,
-        compañiaId: selectedCompany.id,
-        seccionId: selectedSection.id,
-        numeroPoliza: result.datosVelneo.datosPoliza?.numeroPoliza || '',
-        endoso: result.datosVelneo.datosPoliza?.endoso || '0',
-        fechaDesde: result.datosVelneo.datosPoliza?.desde || '',
-        fechaHasta: result.datosVelneo.datosPoliza?.hasta || '',
-        certificado: result.datosVelneo.datosPoliza?.certificado || '',
-        marcaModelo: result.datosVelneo.datosVehiculo?.marcaModelo || '',
-        anio: result.datosVelneo.datosVehiculo?.anio || '',
-        matricula: result.datosVelneo.datosVehiculo?.matricula || '',
-        motor: result.datosVelneo.datosVehiculo?.motor || '',
-        chasis: result.datosVelneo.datosVehiculo?.chasis || '',
-        categoriaId: 0, // Se mapea con maestros
-        destinoId: 0,   // Se mapea con maestros
-        calidadId: 0,   // Se mapea con maestros
-        combustibleId: '', // Se mapea con maestros
-        premio: result.datosVelneo.condicionesPago?.premio || 0,
-        total: result.datosVelneo.condicionesPago?.total || 0,
-        formaPago: result.datosVelneo.condicionesPago?.formaPago || '',
-        cuotas: result.datosVelneo.condicionesPago?.cuotas || 1,
-        valorCuota: result.datosVelneo.condicionesPago?.valorCuota || 0,
-        monedaId: 1, // Default peso uruguayo
-        
-        // ✅ AGREGAR ESTOS CAMPOS FALTANTES:
-        coberturaId: 0, // Se mapea con maestros/tarifas
-        zonaCirculacionId: 0, // Se mapea con maestros/departamentos
-        
-        direccionCobro: result.datosVelneo.datosBasicos?.domicilio || selectedClient.clidir,
-        observaciones: `Procesado con IA - ${result.porcentajeCompletitud}% completitud`,
-        procesadoConIA: true,
-        monedaCoberturaId: 0
-      }; 
+        const formData: PolizaFormData = {
+          clienteId: selectedClient.id,
+          compañiaId: selectedCompany.id,
+          seccionId: selectedSection.id,
+          numeroPoliza: result.datosVelneo.datosPoliza?.numeroPoliza || '',
+          endoso: result.datosVelneo.datosPoliza?.endoso || '0',
+          fechaDesde: result.datosVelneo.datosPoliza?.desde || '',
+          fechaHasta: result.datosVelneo.datosPoliza?.hasta || '',
+          certificado: result.datosVelneo.datosPoliza?.certificado || '',
+          marcaModelo: result.datosVelneo.datosVehiculo?.marcaModelo || '',
+          anio: result.datosVelneo.datosVehiculo?.anio || '',
+          matricula: result.datosVelneo.datosVehiculo?.matricula || '',
+          motor: result.datosVelneo.datosVehiculo?.motor || '',
+          chasis: result.datosVelneo.datosVehiculo?.chasis || '',
+          categoriaId: 0,
+          destinoId: 0,
+          calidadId: 0,
+          combustibleId: '',
+          premio: result.datosVelneo.condicionesPago?.premio || 0,
+          total: result.datosVelneo.condicionesPago?.total || 0,
+          formaPago: result.datosVelneo.condicionesPago?.formaPago || '',
+          cuotas: result.datosVelneo.condicionesPago?.cuotas || 1,
+          valorCuota: result.datosVelneo.condicionesPago?.valorCuota || 0,
+          monedaId: 1,
+          coberturaId: 0,
+          zonaCirculacionId: 0,
+          direccionCobro: result.datosVelneo.datosBasicos?.domicilio || selectedClient.clidir,
+          observaciones: `Procesado con IA - ${result.porcentajeCompletitud}% completitud`,
+          procesadoConIA: true,
+          monedaCoberturaId: 0
+        }; 
         set({ formData });
       }
       
@@ -553,84 +641,133 @@ loadMasterData: async () => {
     }
   },
 
-  // ===== ENVIAR PÓLIZA A VELNEO =====
-  submitPoliza: async () => {
-    const { formData, selectedClient, selectedCompany, selectedSection } = get();
-    
-    if (!formData || !selectedClient || !selectedCompany || !selectedSection) {
-      set({ error: 'Datos incompletos para enviar póliza' });
+submitPoliza: async () => {
+  const { 
+    formData, 
+    selectedClient, 
+    selectedCompany, 
+    selectedSection,
+    formatDateForVelneo,
+    mapearFormaPago,
+    buildObservaciones
+  } = get();
+  
+  if (!formData || !selectedClient || !selectedCompany || !selectedSection) {
+    set({ error: 'Datos incompletos para enviar póliza' });
+    return;
+  }
+
+  set({ isSubmitting: true, error: null });
+  
+  try {
+    console.log('🚀 ENVIANDO REQUEST CON DATOS REALES...');
+    console.log('📋 FormData:', formData);
+    console.log('👤 Cliente:', selectedClient);
+    console.log('🏢 Compañía:', selectedCompany);
+    console.log('📂 Sección:', selectedSection);
+
+    const request = {
+      "comcod": Number(selectedCompany.id),
+      "seccod": Number(selectedSection.id),
+      "clinro": Number(selectedClient.id),
+      "conpol": String(formData.numeroPoliza || ""),
+      "confchdes": formatDateForVelneo(formData.fechaDesde),
+      "confchhas": formatDateForVelneo(formData.fechaHasta),
+      "conpremio": Number(formData.premio) || 0,
+      "asegurado": String(selectedClient.clinom || ""),
+
+      "contra": "1",
+      "congesti": "1",
+      "congeses": "1",
+      "convig": "1",
+      "consta": "1",
+
+      "conmaraut": String(formData.marcaModelo || ""),
+      "conanioaut": Number(formData.anio) || new Date().getFullYear(),
+      "conmataut": String(formData.matricula || ""),
+      "conmotor": String(formData.motor || ""),
+      "conchasis": String(formData.chasis || ""),
+      "conpadaut": "",
+
+      "contot": Number(formData.total || formData.premio) || 0,
+      "concuo": Number(formData.cuotas) || 1,
+      "conimp": Number(formData.premio) || 0,
+      "ramo": "AUTOMOVILES",
+      "com_alias": String(selectedCompany.comalias || "BSE"),
+
+      "catdsc": Number(formData.categoriaId) || 18,
+      "desdsc": Number(formData.destinoId) || 1,
+      "caldsc": Number(formData.calidadId) || 2,
+      "flocod": 0,
+      "tarcod": 0,
+      "corrnom": 0,
+
+      "condom": String(formData.direccionCobro || selectedClient.clidir || ""),
+      "clinom": String(selectedClient.clinom || ""),
+      "clinro1": Number(selectedClient.id),
+
+      "tposegdsc": "Responsabilidad Civil",
+      "concar": "0",
+      "conend": String(formData.endoso || "0"),
+      // ❌ NO INCLUIR: "forpagvid": "...",  ← ESTE CAMPO ES SOLO PARA VIDA
+
+      "moncod": Number(formData.monedaId) || 1,
+      "conviamon": Number(formData.monedaId) || 1,
+
+      "conclaaut": 0,
+      "condedaut": 0,
+      "conresciv": 0,
+      "conbonnsin": 0,
+      "conbonant": 0,
+      "concaraut": 0,
+      "concapaut": 0,
+      "concesnom": "",
+      "concestel": "",
+
+      "observaciones": buildObservaciones(formData),
+      "procesadoConIA": Boolean(formData.procesadoConIA || false)
+    };
+
+    console.log('✅ REQUEST SIN forpagvid (solo para AUTOMÓVILES):', request);
+
+    // 🔍 VALIDACIÓN DE CAMPOS CRÍTICOS
+    const errores = [];
+    if (!request.comcod) errores.push('Compañía no seleccionada');
+    if (!request.clinro) errores.push('Cliente no seleccionado');  
+    if (!request.seccod) errores.push('Sección no seleccionada');
+    if (!request.conpol) errores.push('Número de póliza requerido');
+    if (!request.confchdes) errores.push('Fecha desde requerida');
+    if (!request.confchhas) errores.push('Fecha hasta requerida');
+    if (!request.conpremio) errores.push('Premio requerido');
+    if (!request.asegurado) errores.push('Asegurado requerido');
+
+    if (errores.length > 0) {
+      console.error('❌ Validación fallida:', errores);
+      set({ 
+        error: `Faltan datos: ${errores.join(', ')}`,
+        isSubmitting: false 
+      });
       return;
     }
 
-    set({ isSubmitting: true, error: null });
+    const result = await PolizaApiService.createPoliza(request);
     
-    try {
-      // Construir request exacto para tu backend
-      const request = {
-        // IDs principales
-        comcod: selectedCompany.id,
-        seccod: selectedSection.id,
-        clinro: selectedClient.id,
-        
-        // Datos póliza
-        conpol: formData.numeroPoliza,
-        confchdes: formData.fechaDesde,
-        confchhas: formData.fechaHasta,
-        conend: formData.endoso,
-        
-        // Datos financieros
-        conpremio: formData.premio,
-        contot: formData.total,
-        concuo: formData.cuotas,
-        moncod: formData.monedaId,
-        
-        // Datos cliente
-        asegurado: selectedClient.clinom,
-        clinom: selectedClient.clinom,
-        condom: formData.direccionCobro,
-        documento: selectedClient.cliruc,
-        email: selectedClient.cliemail || '',
-        telefono: selectedClient.clitel || '',
-        departamento: '', // Se mapea después
-        
-        // Datos vehículo
-        conmaraut: formData.marcaModelo,
-        conanioaut: parseInt(formData.anio) || 0,
-        conmataut: formData.matricula,
-        conmotor: formData.motor,
-        conchasis: formData.chasis,
-        marca: formData.marcaModelo.split(' ')[0] || '',
-        modelo: formData.marcaModelo.split(' ').slice(1).join(' ') || '',
-        combustible: formData.combustibleId,
-        
-        // IDs maestros
-        catdsc: formData.categoriaId,
-        desdsc: formData.destinoId,
-        caldsc: formData.calidadId,
-        
-        // Control
-        observaciones: formData.observaciones,
-        procesadoConIA: formData.procesadoConIA,
-        formaPago: formData.formaPago,
-        cantidadCuotas: formData.cuotas,
-        valorCuota: formData.valorCuota
-      };
-
-      const result = await PolizaApiService.createPoliza(request);
-      
-      set({ 
-        isSubmitting: false,
-        currentStep: 'success'
-      });
-      
-    } catch (error) {
-      console.error('❌ Error enviando póliza:', error);
-      set({ 
-        error: error instanceof Error ? error.message : 'Error enviando póliza',
-        isSubmitting: false 
-      });
-    }
-  },
+    console.log('✅ PÓLIZA CREADA EXITOSAMENTE:', result);
+    
+    set({ 
+      isSubmitting: false,
+      currentStep: 'success',
+      error: null
+    });
+    
+  } catch (error) {
+    console.error('❌ Error enviando póliza:', error);
+    set({ 
+      error: error instanceof Error ? error.message : 'Error enviando póliza',
+      isSubmitting: false 
+    });
+  }
+},
 
   // ===== RESET WIZARD =====
   resetWizard: () => {
